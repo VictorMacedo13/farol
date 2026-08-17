@@ -131,8 +131,10 @@ export default function Home() {
     const existing = peers.current.get(peerId);
     if (existing) return existing;
     const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    peer.addTransceiver("video", { direction: "recvonly" });
-    peer.addTransceiver("audio", { direction: "recvonly" });
+    if (!localStream.current) {
+      peer.addTransceiver("video", { direction: "recvonly" });
+      peer.addTransceiver("audio", { direction: "recvonly" });
+    }
     peer.onicecandidate = (event) => { if (event.candidate) send({ type: "ice-candidate", target: peerId, candidate: event.candidate }); };
     peer.ontrack = (event) => setRemoteStreams((streams) => streams.some((item) => item.peerId === peerId) ? streams : [...streams, { peerId, stream: event.streams[0] }]);
     localStream.current?.getTracks().forEach((track) => peer.addTrack(track, localStream.current as MediaStream));
