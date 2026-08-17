@@ -90,10 +90,19 @@ export default function Home() {
       for (const peerId of peersInRoom) await makeOffer(peerId);
       return;
     }
+    if (message.type === "share-started") {
+      console.info("[farol:media] transmissão iniciada", { peerId: message.peerId });
+      return;
+    }
+    if (message.type === "share-stopped") {
+      const peerId = String(message.peerId);
+      setRemoteStreams((streams) => streams.filter((stream) => stream.peerId !== peerId));
+      return;
+    }
     if (message.type === "peer-joined") {
       const peerId = String(message.peerId);
       setPeerIds((ids) => ids.includes(peerId) ? ids : [...ids, peerId]);
-      if (localStream.current) await makeOffer(peerId);
+      await makeOffer(peerId);
       return;
     }
     if (message.type === "offer") {
@@ -122,6 +131,8 @@ export default function Home() {
     const existing = peers.current.get(peerId);
     if (existing) return existing;
     const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    peer.addTransceiver("video", { direction: "recvonly" });
+    peer.addTransceiver("audio", { direction: "recvonly" });
     peer.onicecandidate = (event) => { if (event.candidate) send({ type: "ice-candidate", target: peerId, candidate: event.candidate }); };
     peer.ontrack = (event) => setRemoteStreams((streams) => streams.some((item) => item.peerId === peerId) ? streams : [...streams, { peerId, stream: event.streams[0] }]);
     localStream.current?.getTracks().forEach((track) => peer.addTrack(track, localStream.current as MediaStream));
@@ -149,6 +160,7 @@ export default function Home() {
       setRemoteStreams((streams) => [{ peerId: "local-screen", stream: new MediaStream(stream.getVideoTracks()), local: true }, ...streams.filter((item) => item.peerId !== "local-screen")]);
       setIsSharing(true);
       setStatus("Sua tela está ao vivo");
+      send({ type: "share-started" });
       for (const [peerId, peer] of peers.current) {
         stream.getTracks().forEach((track) => peer.addTrack(track, stream));
         await makeOffer(peerId);
@@ -159,6 +171,7 @@ export default function Home() {
 
   function stopSharing() {
     const tracks = localStream.current?.getTracks() ?? [];
+    send({ type: "share-stopped" });
     for (const [peerId, peer] of peers.current) {
       peer.getSenders().filter((sender) => sender.track && tracks.includes(sender.track)).forEach((sender) => peer.removeTrack(sender));
       void makeOffer(peerId);
@@ -179,6 +192,8 @@ function Landing({ roomInput, setRoomInput, createRoom, joinRoom, status }: { ro
 }
 
 function Room({ roomId, status, isSharing, localStream, peerIds, remoteStreams, shareScreen, stopSharing }: { roomId: string; status: string; isSharing: boolean; localStream: MediaStream | null; peerIds: string[]; remoteStreams: RemoteStream[]; shareScreen: () => void; stopSharing: () => void }) {
+  const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
+  const activeStreams = selectedStreamId ? remoteStreams.filter((stream) => stream.peerId === selectedStreamId) : remoteStreams;
   const [isFullscreen, setIsFullscreen] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   async function toggleFullscreen() {
@@ -189,4 +204,20 @@ function Room({ roomId, status, isSharing, localStream, peerIds, remoteStreams, 
   return <main className="room"><div className="topbar"><div className="brand"><span className="brand-mark" />farol</div><span className="connection">● {status}</span><span className="avatar">VC</span></div><header className="room-head"><div><p className="eyebrow">sala privada</p><h1>Sala ao vivo</h1></div><div className="room-code">código <strong>{roomId}</strong><button onClick={() => navigator.clipboard.writeText(roomId)}>⧉</button></div></header><div className="room-grid"><section><div className={`stage ${remoteStreams.length ? "has-remote" : ""}`}>{remoteStreams.length ? remoteStreams.map((item) => <RemoteVideo key={item.peerId} stream={item.stream} />) : <div className="empty"><div className="screen-icon">▣</div><h2>{isSharing ? "Transmitindo sua tela" : "Sua tela ainda não está sendo compartilhada"}</h2><p>{isSharing ? "Aguarde as outras pessoas entrarem na sala." : "Todos na sala poderão acompanhar em tempo real com áudio."}</p>{!isSharing && <button className="primary" onClick={shareScreen}>▣ Compartilhar tela</button>}</div>}{isSharing && <div className="live-badge">● transmissão ao vivo</div>}</div><div className="controls"><button>♩</button><button>◉</button><span>{remoteStreams.length + 1} assistindo</span>{isSharing && <button className="stop" onClick={stopSharing}>Encerrar transmissão</button>}</div></section><aside><div className="side-title"><h2>Pessoas na sala</h2><b>{remoteStreams.length + 1}</b></div><div className="person"><span className="person-avatar p0">VC</span><div><strong>Você</strong><small>{isSharing ? "apresentando agora" : "ouvindo"}</small></div></div>{remoteStreams.map((item, index) => <div className="person" key={item.peerId}><span className={`person-avatar p${(index + 1) % 5}`}>P{index + 1}</span><div><strong>Participante {index + 1}</strong><small>compartilhando tela</small></div></div>)}<hr /><div className="side-title"><h2>Como funciona</h2></div><p className="hint">Várias pessoas podem compartilhar ao mesmo tempo. Cada transmissão aparece em um quadro separado, com áudio quando o navegador permitir.</p></aside></div></main>;
 }
 
-function RemoteVideo({ stream, muted = stream.getAudioTracks().length === 0 }: { stream: MediaStream; muted?: boolean }) { const ref = useRef<HTMLVideoElement>(null); useEffect(() => { if (ref.current) ref.current.srcObject = stream; }, [stream]); async function toggleFullscreen() { if (document.fullscreenElement) await document.exitFullscreen(); else await ref.current?.requestFullscreen(); } return <div className="video-tile"><video className="remote-video" ref={ref} autoPlay playsInline muted={muted} /><button className="video-fullscreen" onClick={toggleFullscreen} title="Ver em tela cheia" aria-label="Ver em tela cheia">⛶</button></div>; }
+function RemoteVideo({ stream, muted = stream.getAudioTracks().length === 0 }: { stream: MediaStream; muted?: boolean }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [audioBlocked, setAudioBlocked] = useState(!muted && stream.getAudioTracks().length > 0);
+  useEffect(() => {
+    if (!ref.current) return;
+    ref.current.srcObject = stream;
+    void ref.current.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(!muted));
+  }, [muted, stream]);
+  async function enableAudio() {
+    if (!ref.current) return;
+    ref.current.muted = false;
+    await ref.current.play();
+    setAudioBlocked(false);
+  }
+  async function toggleFullscreen() { if (document.fullscreenElement) await document.exitFullscreen(); else await ref.current?.requestFullscreen(); }
+  return <div className="video-tile"><video className="remote-video" ref={ref} autoPlay playsInline muted={muted} controls={!muted} /><div className="video-actions">{audioBlocked && <button className="video-audio" onClick={enableAudio}>Ativar som</button>}<button className="video-fullscreen" onClick={toggleFullscreen} title="Ver em tela cheia" aria-label="Ver em tela cheia">⛶</button></div></div>;
+}

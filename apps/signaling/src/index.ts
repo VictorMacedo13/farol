@@ -8,6 +8,7 @@ const port = Number(process.env.PORT ?? 8787);
 const signalUrl = process.env.SIGNAL_URL ?? `ws://localhost:${port}`;
 const rooms = new Map<string, Set<Client>>();
 const clients = new Map<string, Client>();
+const activeShares = new Map<string, Set<string>>();
 
 function createRoomId() {
   let roomId = "";
@@ -31,6 +32,9 @@ function leave(client: Client) {
   room?.delete(client);
   broadcast(client.roomId, { type: "peer-left", peerId: client.id });
   if (room?.size === 0) rooms.delete(client.roomId);
+  const shares = activeShares.get(client.roomId);
+  shares?.delete(client.id);
+  if (shares?.size === 0) activeShares.delete(client.roomId);
   client.roomId = undefined;
 }
 
@@ -51,6 +55,7 @@ server.on("connection", (socket) => {
       const roomId = createRoomId();
       client.roomId = roomId;
       rooms.set(roomId, new Set([client]));
+      activeShares.set(roomId, new Set());
       send(client, { type: "room-created", roomId });
       return;
     }
@@ -63,8 +68,17 @@ server.on("connection", (socket) => {
       client.roomId = roomId;
       const existingPeers = [...room].map((peer) => peer.id);
       room.add(client);
-      send(client, { type: "room-joined", roomId, peers: existingPeers });
+      send(client, { type: "room-joined", roomId, peers: existingPeers, activeShares: [...(activeShares.get(roomId) ?? [])] });
       broadcast(roomId, { type: "peer-joined", peerId: client.id }, client.id);
+      return;
+    }
+
+    if (message.type === "share-started" || message.type === "share-stopped") {
+      if (!client.roomId) return;
+      const shares = activeShares.get(client.roomId) ?? new Set<string>();
+      if (message.type === "share-started") shares.add(client.id); else shares.delete(client.id);
+      activeShares.set(client.roomId, shares);
+      broadcast(client.roomId, { type: message.type, peerId: client.id }, client.id);
       return;
     }
 
