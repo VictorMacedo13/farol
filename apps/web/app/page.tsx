@@ -7,17 +7,26 @@ type Signal = { type: string; [key: string]: unknown };
 
 const SIGNAL_URL = process.env.NEXT_PUBLIC_SIGNAL_URL ?? (typeof window !== "undefined" ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8787` : "ws://localhost:8787");
 
+if (typeof window !== "undefined") {
+  console.info("[farol:websocket] SIGNAL_URL:", SIGNAL_URL);
+}
+
 export default function Home() {
   const [roomId, setRoomId] = useState("");
   const [roomInput, setRoomInput] = useState("");
   const [inRoom, setInRoom] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
+  const [peerIds, setPeerIds] = useState<string[]>([]);
   const [status, setStatus] = useState("Pronto para começar");
   const socket = useRef<WebSocket | null>(null);
   const clientId = useRef("");
   const peers = useRef(new Map<string, RTCPeerConnection>());
   const localStream = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (inRoom) setStatus(`${peerIds.length + 1} pessoa${peerIds.length === 0 ? "" : "s"} na sala`);
+  }, [inRoom, peerIds]);
 
   useEffect(() => () => {
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -27,16 +36,33 @@ export default function Home() {
 
   function connect() {
     if (socket.current?.readyState === WebSocket.OPEN) return socket.current;
+    console.info("[farol:websocket] abrindo conexão", { url: SIGNAL_URL });
     const connection = new WebSocket(SIGNAL_URL);
     socket.current = connection;
-    connection.onopen = () => setStatus("Conectado ao servidor");
-    connection.onerror = () => setStatus("Não foi possível conectar ao servidor");
-    connection.onmessage = (event) => handleSignal(JSON.parse(event.data) as Signal);
+    connection.onopen = () => {
+      console.info("[farol:websocket] conectado", { url: SIGNAL_URL });
+      setStatus("Conectado ao servidor");
+    };
+    connection.onerror = (event) => {
+      console.error("[farol:websocket] erro", { url: SIGNAL_URL, event });
+      setStatus("Não foi possível conectar ao servidor");
+    };
+    connection.onclose = (event) => console.warn("[farol:websocket] conexão encerrada", { url: SIGNAL_URL, code: event.code, reason: event.reason });
+    connection.onmessage = (event) => {
+      const message = JSON.parse(event.data) as Signal;
+      console.debug("[farol:websocket] recebido", { url: SIGNAL_URL, type: message.type });
+      void handleSignal(message);
+    };
     return connection;
   }
 
   function send(message: Signal) {
-    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(message));
+    if (socket.current?.readyState === WebSocket.OPEN) {
+      console.debug("[farol:websocket] enviado", { url: SIGNAL_URL, type: message.type, target: message.target });
+      socket.current.send(JSON.stringify(message));
+    } else {
+      console.warn("[farol:websocket] envio ignorado: conexão não está aberta", { url: SIGNAL_URL, type: message.type });
+    }
   }
 
   async function createRoom() {
@@ -60,10 +86,16 @@ export default function Home() {
       setInRoom(true);
       setStatus("Sala conectada");
       const peersInRoom = (message.peers as string[] | undefined) ?? [];
+      setPeerIds(peersInRoom);
       for (const peerId of peersInRoom) await makeOffer(peerId);
       return;
     }
-    if (message.type === "peer-joined") { if (localStream.current) await makeOffer(String(message.peerId)); return; }
+    if (message.type === "peer-joined") {
+      const peerId = String(message.peerId);
+      setPeerIds((ids) => ids.includes(peerId) ? ids : [...ids, peerId]);
+      if (localStream.current) await makeOffer(peerId);
+      return;
+    }
     if (message.type === "offer") {
       const peer = getPeer(String(message.from));
       await peer.setRemoteDescription(message.offer as RTCSessionDescriptionInit);
@@ -78,7 +110,11 @@ export default function Home() {
       await peers.current.get(String(message.from))?.addIceCandidate(candidate).catch(() => undefined);
       return;
     }
-    if (message.type === "peer-left") removePeer(String(message.peerId));
+    if (message.type === "peer-left") {
+      const peerId = String(message.peerId);
+      setPeerIds((ids) => ids.filter((id) => id !== peerId));
+      removePeer(peerId);
+    }
     if (message.type === "error") setStatus(String(message.message));
   }
 
@@ -135,14 +171,14 @@ export default function Home() {
   }
 
   if (!inRoom) return <Landing roomInput={roomInput} setRoomInput={setRoomInput} createRoom={createRoom} joinRoom={joinRoom} status={status} />;
-  return <Room roomId={roomId} status={status} isSharing={isSharing} localStream={localStream.current} remoteStreams={remoteStreams} shareScreen={shareScreen} stopSharing={stopSharing} />;
+  return <Room roomId={roomId} status={status} isSharing={isSharing} localStream={localStream.current} peerIds={peerIds} remoteStreams={remoteStreams} shareScreen={shareScreen} stopSharing={stopSharing} />;
 }
 
 function Landing({ roomInput, setRoomInput, createRoom, joinRoom, status }: { roomInput: string; setRoomInput: (value: string) => void; createRoom: () => void; joinRoom: () => void; status: string }) {
   return <main className="landing"><div className="topbar"><div className="brand"><span className="brand-mark" />farol</div><span className="connection">● {status}</span><span className="avatar">VC</span></div><section className="hero"><div className="hero-copy"><p className="eyebrow">sala de transmissão ao vivo</p><h1>Veja junto.<br /><em>Esteja presente.</em></h1><p className="lead">Compartilhe sua tela com imagem e áudio em uma sala privada. A conversa acontece em tempo real.</p><div className="actions"><button className="primary" onClick={createRoom}>+ Criar uma sala</button><div className="join"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && joinRoom()} placeholder="código da sala" aria-label="Código da sala" /><button onClick={joinRoom}>Entrar →</button></div></div><small>conexão WebRTC criptografada · até 50 pessoas</small></div><div className="hero-visual"><div className="visual-label">● ao vivo agora</div><div className="mock-screen"><div className="mock-bar"><i /><i /><i /> apresentação / projeto</div><div className="mock-content"><span>IDEIAS EM MOVIMENTO</span><strong>Um espaço<br />para criar<br /><b>juntos.</b></strong></div></div><div className="visual-foot">◉ 8 pessoas assistindo</div></div></section></main>;
 }
 
-function Room({ roomId, status, isSharing, localStream, remoteStreams, shareScreen, stopSharing }: { roomId: string; status: string; isSharing: boolean; localStream: MediaStream | null; remoteStreams: RemoteStream[]; shareScreen: () => void; stopSharing: () => void }) {
+function Room({ roomId, status, isSharing, localStream, peerIds, remoteStreams, shareScreen, stopSharing }: { roomId: string; status: string; isSharing: boolean; localStream: MediaStream | null; peerIds: string[]; remoteStreams: RemoteStream[]; shareScreen: () => void; stopSharing: () => void }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   async function toggleFullscreen() {

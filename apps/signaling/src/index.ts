@@ -5,6 +5,7 @@ type Client = { id: string; socket: WebSocket; roomId?: string };
 type SignalMessage = { type: string; [key: string]: unknown };
 
 const port = Number(process.env.PORT ?? 8787);
+const signalUrl = process.env.SIGNAL_URL ?? `ws://localhost:${port}`;
 const rooms = new Map<string, Set<Client>>();
 const clients = new Map<string, Client>();
 
@@ -37,11 +38,13 @@ const server = new WebSocketServer({ port });
 server.on("connection", (socket) => {
   const client: Client = { id: randomBytes(8).toString("hex"), socket };
   clients.set(client.id, client);
+  console.log(`[farol:websocket] cliente conectado id=${client.id}`);
   send(client, { type: "ready", clientId: client.id });
 
   socket.on("message", (raw) => {
     let message: SignalMessage;
     try { message = JSON.parse(raw.toString()) as SignalMessage; } catch { return; }
+    console.log(`[farol:websocket] recebido id=${client.id} type=${message.type}`);
 
     if (message.type === "create-room") {
       leave(client);
@@ -67,11 +70,15 @@ server.on("connection", (socket) => {
 
     if (["offer", "answer", "ice-candidate"].includes(message.type)) {
       const target = clients.get(String(message.target));
-      if (target) send(target, { ...message, from: client.id });
+      if (target) {
+        console.log(`[farol:websocket] encaminhando type=${message.type} from=${client.id} to=${target.id}`);
+        send(target, { ...message, from: client.id });
+      }
     }
   });
 
-  socket.on("close", () => { leave(client); clients.delete(client.id); });
+  socket.on("close", () => { console.log(`[farol:websocket] cliente desconectado id=${client.id}`); leave(client); clients.delete(client.id); });
 });
 
-console.log(`Farol signaling running on ws://localhost:${port}`);
+console.log(`[farol:websocket] SIGNAL_URL: ${signalUrl}`);
+console.log(`Farol signaling running on ${signalUrl}`);
