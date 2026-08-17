@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: farol-signaling
+    runtime: node
+    rootDir: .
+    buildCommand: npm install && npm run build -w apps/signaling
+    startCommand: npm run start -w apps/signaling
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+
+  - type: web
+    name: farol-web
+    runtime: node
+    rootDir: .
+    buildCommand: npm install && npm run build -w apps/web
+    startCommand: npm run start -w apps/web
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: NEXT_PUBLIC_SIGNAL_URL
+        sync: false
