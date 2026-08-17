@@ -14,10 +14,12 @@ if (typeof window !== "undefined") {
 export default function Home() {
   const [roomId, setRoomId] = useState("");
   const [roomInput, setRoomInput] = useState("");
+  const [name, setName] = useState("");
   const [inRoom, setInRoom] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
   const [peerIds, setPeerIds] = useState<string[]>([]);
+  const [peerNames, setPeerNames] = useState<Record<string, string>>({});
   const [status, setStatus] = useState("Pronto para começar");
   const socket = useRef<WebSocket | null>(null);
   const clientId = useRef("");
@@ -25,8 +27,23 @@ export default function Home() {
   const localStream = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    if (inRoom) setStatus(`${peerIds.length + 1} pessoa${peerIds.length === 0 ? "" : "s"} na sala`);
-  }, [inRoom, peerIds]);
+    const savedName = localStorage.getItem("farol:name") ?? "";
+    const savedRoom = localStorage.getItem("farol:room") ?? "";
+    setName(savedName);
+    if (savedRoom && savedName) {
+      setRoomInput(savedRoom);
+      const connection = connect();
+      const open = () => send({ type: "join-room", roomId: savedRoom, name: savedName });
+      connection.readyState === WebSocket.OPEN ? open() : connection.addEventListener("open", open, { once: true });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (inRoom) {
+      const names = Object.values(peerNames).filter(Boolean);
+      setStatus(`${peerIds.length + 1} pessoa${peerIds.length === 0 ? "" : "s"} na sala${names.length ? ` · ${names.join(", ")}` : ""}`);
+    }
+  }, [inRoom, peerIds, peerNames]);
 
   useEffect(() => () => {
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -66,16 +83,21 @@ export default function Home() {
   }
 
   async function createRoom() {
+    const displayName = name.trim() || "Convidado";
+    localStorage.setItem("farol:name", displayName);
     const connection = connect();
-    const open = () => send({ type: "create-room" });
+    const open = () => send({ type: "create-room", name: displayName });
     connection.readyState === WebSocket.OPEN ? open() : connection.addEventListener("open", open, { once: true });
   }
 
   async function joinRoom() {
     const code = roomInput.trim().toUpperCase();
     if (!code) return;
+    const displayName = name.trim() || "Convidado";
+    localStorage.setItem("farol:name", displayName);
+    localStorage.setItem("farol:room", code);
     const connection = connect();
-    const open = () => send({ type: "join-room", roomId: code });
+    const open = () => send({ type: "join-room", roomId: code, name: displayName });
     connection.readyState === WebSocket.OPEN ? open() : connection.addEventListener("open", open, { once: true });
   }
 
@@ -83,10 +105,12 @@ export default function Home() {
     if (message.type === "ready") { clientId.current = String(message.clientId); return; }
     if (message.type === "room-created" || message.type === "room-joined") {
       setRoomId(String(message.roomId));
+      localStorage.setItem("farol:room", String(message.roomId));
       setInRoom(true);
       setStatus("Sala conectada");
       const peersInRoom = (message.peers as string[] | undefined) ?? [];
       setPeerIds(peersInRoom);
+      setPeerNames({ client: name || "Convidado", ...((message.peerNames as Record<string, string> | undefined) ?? {}) });
       for (const peerId of peersInRoom) await makeOffer(peerId);
       return;
     }
@@ -102,12 +126,14 @@ export default function Home() {
     if (message.type === "peer-joined") {
       const peerId = String(message.peerId);
       setPeerIds((ids) => ids.includes(peerId) ? ids : [...ids, peerId]);
+      setPeerNames((names) => ({ ...names, [peerId]: String(message.name ?? "Convidado") }));
       await makeOffer(peerId);
       return;
     }
     if (message.type === "offer") {
       const peer = getPeer(String(message.from));
       await peer.setRemoteDescription(message.offer as RTCSessionDescriptionInit);
+      attachLocalTracks(peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       send({ type: "answer", target: String(message.from), answer });
@@ -131,19 +157,31 @@ export default function Home() {
     const existing = peers.current.get(peerId);
     if (existing) return existing;
     const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    if (!localStream.current) {
-      peer.addTransceiver("video", { direction: "recvonly" });
-      peer.addTransceiver("audio", { direction: "recvonly" });
-    }
+    peer.onconnectionstatechange = () => console.info("[farol:webrtc] estado", { peerId, state: peer.connectionState });
     peer.onicecandidate = (event) => { if (event.candidate) send({ type: "ice-candidate", target: peerId, candidate: event.candidate }); };
-    peer.ontrack = (event) => setRemoteStreams((streams) => streams.some((item) => item.peerId === peerId) ? streams : [...streams, { peerId, stream: event.streams[0] }]);
-    localStream.current?.getTracks().forEach((track) => peer.addTrack(track, localStream.current as MediaStream));
+    peer.ontrack = (event) => {
+      console.info("[farol:webrtc] faixa recebida", { peerId, kind: event.track.kind });
+      setRemoteStreams((streams) => streams.some((item) => item.peerId === peerId) ? streams : [...streams, { peerId, stream: event.streams[0] }]);
+    };
     peers.current.set(peerId, peer);
     return peer;
   }
 
+  function attachLocalTracks(peer: RTCPeerConnection) {
+    const stream = localStream.current;
+    if (!stream) return;
+    stream.getTracks().forEach((track) => {
+      if (!peer.getSenders().some((sender) => sender.track?.id === track.id)) peer.addTrack(track, stream);
+    });
+  }
+
   async function makeOffer(peerId: string) {
     const peer = getPeer(peerId);
+    if (localStream.current) attachLocalTracks(peer);
+    else if (peer.getTransceivers().length === 0) {
+      peer.addTransceiver("video", { direction: "recvonly" });
+      peer.addTransceiver("audio", { direction: "recvonly" });
+    }
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
     send({ type: "offer", target: peerId, offer });
@@ -164,7 +202,7 @@ export default function Home() {
       setStatus("Sua tela está ao vivo");
       send({ type: "share-started" });
       for (const [peerId, peer] of peers.current) {
-        stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+        attachLocalTracks(peer);
         await makeOffer(peerId);
       }
       stream.getVideoTracks()[0]?.addEventListener("ended", stopSharing);
@@ -174,26 +212,26 @@ export default function Home() {
   function stopSharing() {
     const tracks = localStream.current?.getTracks() ?? [];
     send({ type: "share-stopped" });
+    localStream.current = null;
     for (const [peerId, peer] of peers.current) {
       peer.getSenders().filter((sender) => sender.track && tracks.includes(sender.track)).forEach((sender) => peer.removeTrack(sender));
       void makeOffer(peerId);
     }
     tracks.forEach((track) => track.stop());
-    localStream.current = null;
     setRemoteStreams((streams) => streams.filter((item) => item.peerId !== "local-screen"));
     setIsSharing(false);
     setStatus("Transmissão encerrada");
   }
 
-  if (!inRoom) return <Landing roomInput={roomInput} setRoomInput={setRoomInput} createRoom={createRoom} joinRoom={joinRoom} status={status} />;
-  return <Room roomId={roomId} status={status} isSharing={isSharing} localStream={localStream.current} peerIds={peerIds} remoteStreams={remoteStreams} shareScreen={shareScreen} stopSharing={stopSharing} />;
+  if (!inRoom) return <Landing name={name} setName={setName} roomInput={roomInput} setRoomInput={setRoomInput} createRoom={createRoom} joinRoom={joinRoom} status={status} />;
+  return <Room roomId={roomId} name={name} status={status} isSharing={isSharing} localStream={localStream.current} peerIds={peerIds} peerNames={peerNames} remoteStreams={remoteStreams} shareScreen={shareScreen} stopSharing={stopSharing} />;
 }
 
-function Landing({ roomInput, setRoomInput, createRoom, joinRoom, status }: { roomInput: string; setRoomInput: (value: string) => void; createRoom: () => void; joinRoom: () => void; status: string }) {
-  return <main className="landing"><div className="topbar"><div className="brand"><span className="brand-mark" />farol</div><span className="connection">● {status}</span><span className="avatar">VC</span></div><section className="hero"><div className="hero-copy"><p className="eyebrow">sala de transmissão ao vivo</p><h1>Veja junto.<br /><em>Esteja presente.</em></h1><p className="lead">Compartilhe sua tela com imagem e áudio em uma sala privada. A conversa acontece em tempo real.</p><div className="actions"><button className="primary" onClick={createRoom}>+ Criar uma sala</button><div className="join"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && joinRoom()} placeholder="código da sala" aria-label="Código da sala" /><button onClick={joinRoom}>Entrar →</button></div></div><small>conexão WebRTC criptografada · até 50 pessoas</small></div><div className="hero-visual"><div className="visual-label">● ao vivo agora</div><div className="mock-screen"><div className="mock-bar"><i /><i /><i /> apresentação / projeto</div><div className="mock-content"><span>IDEIAS EM MOVIMENTO</span><strong>Um espaço<br />para criar<br /><b>juntos.</b></strong></div></div><div className="visual-foot">◉ 8 pessoas assistindo</div></div></section></main>;
+function Landing({ name, setName, roomInput, setRoomInput, createRoom, joinRoom, status }: { name: string; setName: (value: string) => void; roomInput: string; setRoomInput: (value: string) => void; createRoom: () => void; joinRoom: () => void; status: string }) {
+  return <main className="landing"><div className="topbar"><div className="brand"><span className="brand-mark" />farol</div><span className="connection">● {status}</span><span className="avatar">VC</span></div><section className="hero"><div className="hero-copy"><p className="eyebrow">sala de transmissão ao vivo</p><h1>Veja junto.<br /><em>Esteja presente.</em></h1><p className="lead">Compartilhe sua tela com imagem e áudio em uma sala privada. A conversa acontece em tempo real.</p><div className="actions"><input className="name-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="Seu nome" aria-label="Seu nome" maxLength={32} /><button className="primary" onClick={createRoom}>+ Criar uma sala</button><div className="join"><input value={roomInput} onChange={(event) => setRoomInput(event.target.value)} onKeyDown={(event) => event.key === "Enter" && joinRoom()} placeholder="código da sala" aria-label="Código da sala" /><button onClick={joinRoom}>Entrar →</button></div></div><small>conexão WebRTC criptografada · até 50 pessoas</small></div><div className="hero-visual"><div className="visual-label">● ao vivo agora</div><div className="mock-screen"><div className="mock-bar"><i /><i /><i /> apresentação / projeto</div><div className="mock-content"><span>IDEIAS EM MOVIMENTO</span><strong>Um espaço<br />para criar<br /><b>juntos.</b></strong></div></div><div className="visual-foot">◉ 8 pessoas assistindo</div></div></section></main>;
 }
 
-function Room({ roomId, status, isSharing, localStream, peerIds, remoteStreams, shareScreen, stopSharing }: { roomId: string; status: string; isSharing: boolean; localStream: MediaStream | null; peerIds: string[]; remoteStreams: RemoteStream[]; shareScreen: () => void; stopSharing: () => void }) {
+function Room({ roomId, name, status, isSharing, localStream, peerIds, peerNames, remoteStreams, shareScreen, stopSharing }: { roomId: string; name: string; status: string; isSharing: boolean; localStream: MediaStream | null; peerIds: string[]; peerNames: Record<string, string>; remoteStreams: RemoteStream[]; shareScreen: () => void; stopSharing: () => void }) {
   const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
   const activeStreams = selectedStreamId ? remoteStreams.filter((stream) => stream.peerId === selectedStreamId) : remoteStreams;
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -212,6 +250,7 @@ function RemoteVideo({ stream, muted = stream.getAudioTracks().length === 0 }: {
   useEffect(() => {
     if (!ref.current) return;
     ref.current.srcObject = stream;
+    ref.current.onloadeddata = () => console.info("[farol:media] vídeo carregado", { tracks: stream.getTracks().map((track) => track.kind) });
     void ref.current.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(!muted));
   }, [muted, stream]);
   async function enableAudio() {

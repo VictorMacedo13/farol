@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 
-type Client = { id: string; socket: WebSocket; roomId?: string };
+type Client = { id: string; socket: WebSocket; roomId?: string; name: string };
 type SignalMessage = { type: string; [key: string]: unknown };
 
 const port = Number(process.env.PORT ?? 8787);
@@ -40,7 +40,7 @@ function leave(client: Client) {
 
 const server = new WebSocketServer({ port });
 server.on("connection", (socket) => {
-  const client: Client = { id: randomBytes(8).toString("hex"), socket };
+  const client: Client = { id: randomBytes(8).toString("hex"), socket, name: "Convidado" };
   clients.set(client.id, client);
   console.log(`[farol:websocket] cliente conectado id=${client.id}`);
   send(client, { type: "ready", clientId: client.id });
@@ -51,6 +51,7 @@ server.on("connection", (socket) => {
     console.log(`[farol:websocket] recebido id=${client.id} type=${message.type}`);
 
     if (message.type === "create-room") {
+      client.name = String(message.name ?? "Convidado").trim().slice(0, 32) || "Convidado";
       leave(client);
       const roomId = createRoomId();
       client.roomId = roomId;
@@ -65,11 +66,13 @@ server.on("connection", (socket) => {
       const room = rooms.get(roomId);
       if (!room) { send(client, { type: "error", message: "Sala não encontrada." }); return; }
       leave(client);
+      client.name = String(message.name ?? "Convidado").trim().slice(0, 32) || "Convidado";
       client.roomId = roomId;
       const existingPeers = [...room].map((peer) => peer.id);
       room.add(client);
-      send(client, { type: "room-joined", roomId, peers: existingPeers, activeShares: [...(activeShares.get(roomId) ?? [])] });
-      broadcast(roomId, { type: "peer-joined", peerId: client.id }, client.id);
+      const peerNames = Object.fromEntries([...room].map((peer) => [peer.id, peer.name]));
+      send(client, { type: "room-joined", roomId, peers: existingPeers, peerNames, activeShares: [...(activeShares.get(roomId) ?? [])] });
+      broadcast(roomId, { type: "peer-joined", peerId: client.id, name: client.name }, client.id);
       return;
     }
 
