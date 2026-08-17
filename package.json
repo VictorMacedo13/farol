@@ -1,0 +1,13 @@
+{
+  "name": "farol-monorepo",
+  "private": true,
+  "workspaces": ["apps/web", "apps/signaling"],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w apps/signaling\" \"npm run dev -w apps/web\"",
+    "build": "npm run build -w apps/web && npm run build -w apps/signaling",
+    "typecheck": "npm run typecheck -w apps/web && npm run typecheck -w apps/signaling"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
